@@ -1,0 +1,198 @@
+---
+title: "DGE (Mast) and cell population analysis for single cell RNA sequencing of WT sham vs resected mouse hearts"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+DGE analyses taken from https://satijalab.org/seurat/archive/v3.0/interaction_vignette.html
+and SCRB 99b sample scripts
+
+```{r}
+# import libraries
+library(Seurat)
+library(Matrix)
+library(hdf5r)
+library(ggplot2)
+library(SeuratDisk)
+library(scater)
+library(readxl)
+library(stringr)
+```
+
+```{r}
+# import seurat object (if already analyzed)
+samplescombined <- readRDS("file")
+```
+
+
+```{r}
+# find proportion cells per cluster in each sample
+numcell <- table(samplescombined$orig.ident)
+cellpercluster <- table(Idents(samplescombined), samplescombined$orig.ident)
+names(cellpercluster) <- c("Sample1", "Sample2")
+cellpercluster <- as.data.frame.matrix(cellpercluster)
+
+# add column with total number of cells per cluster
+total <- transform(cellpercluster, TotalCellsPerCluster = Sample1 + Sample2)
+
+# add column with percentage per sample of the total in each cluster
+totalwithpercen <- transform (total, Sample1Percen = Sample1 / TotalCellsPerCluster, Sample2Percen = Sample2 / TotalCellsPerCluster)
+
+# read in excel file with appropriate data structure for ggplot
+exceldata = read_excel("file")
+forggplot = data.frame(exceldata)
+forggplot$percent <- forggplot$percent*100
+
+# make stacked bar chart based on percentage per sample
+percentageofsumcluster <- ggplot(forggplot, aes(fill=samplename, y=percent, x=celltype)) + 
+    geom_bar(position="stack", stat="identity") 
+percentageofsumclusternew <- percentageofsumcluster + theme(axis.title = element_text(size=10), axis.text.x = element_text(angle = 45, hjust = 1), legend.title= element_blank()) +labs(y= "Percentage of Total Cells in Cluster", x = "Cell Type") + scale_fill_discrete(labels = c("Sham", "Resected"))
+percentageofsumclusternew
+ggsave(path = "file", filename = paste("percentageofsumcluster", ".png", sep=""), plot = percentageofsumclusternew)
+
+
+# make stacked bar chart based on cell numbers per sample
+cellcluster <- ggplot(forggplot, aes(fill=samplename, y=cellnum, x=celltype)) + 
+    geom_bar(position="stack", stat="identity") 
+cellclusternew <- cellcluster + theme(axis.title = element_text(size=10), axis.text.x = element_text(angle = 45, hjust = 1), legend.title= element_blank()) +labs(y= "Cell Number", x = "Cell Type") + scale_fill_discrete(labels = c("Sham", "Resected"))
+cellclusternew
+ggsave(path = "file", filename = paste("cellclusternew", ".png", sep=""), plot = cellclusternew)
+
+
+```
+
+
+```{r}
+# subset PROLIFERATING ENDOTHELIAL CELLS into separate seurat obj
+prolifendo <- subset(samplescombined, idents = "Proliferating Endothelial Cells")
+
+# find variable features between conditions (sham v resected)
+top30 <- head(VariableFeatures(endo), 30)
+plot1 <- VariableFeaturePlot(samplescombined)
+plot2 <- LabelPoints(plot = plot1, points = top20, repel = TRUE)
+plot2
+DoHeatmap(object = endo, group.by = "orig.ident", features = top30)
+
+# do MAST DGE on proliferating endothelial cell cluster
+Idents(prolifendo) <- "orig.ident"
+dgeprolifendo <- FindMarkers(prolifendo, ident.1 = "Sample1", test.use="MAST", only.pos=FALSE, min.pct = 0, logfc.threshold = 0)
+
+# test plot, no fancy things
+# code from https://biocorecrg.github.io/CRG_RIntroduction/volcano-plots.html
+volcanoplotprolifendo <- ggplot(data=dgeprolifendo, aes(x=avg_log2FC, y=-log10(p_val_adj))) + geom_point() + theme_minimal()
+volcanoplotprolifendo <- volcanoplotprolifendo + geom_vline(xintercept=c(-0.6, 0.6), col="red") +
+    geom_hline(yintercept=-log10(0.05), col="red")
+volcanoplotprolifendo
+
+dgeprolifendo$diffexpressed <- "NO"
+# if avg_log2FC > 0.6 and pvalue < 0.05, set as "UP" 
+dgeprolifendo$diffexpressed[dgeprolifendo$avg_log2FC > 0.6 & dgeprolifendo$p_val_adj < 0.05] <- "UP"
+# if avg_log2FC < -0.6 and pvalue < 0.05, set as "DOWN"
+dgeprolifendo$diffexpressed[dgeprolifendo$avg_log2FC < -0.6 & dgeprolifendo$p_val_adj < 0.05] <- "DOWN"
+
+# color points with "diffexpressed"
+volcanoplotprolifendo <- ggplot(data=dgeprolifendo, aes(x=avg_log2FC, y=-log10(p_val_adj), col=diffexpressed)) + geom_point() + theme_minimal()
+volcanoplotprolifendo
+
+# add lines showing significance threshold
+volcanoplotprolifendo <- volcanoplotprolifendo + geom_vline(xintercept=c(-0.6, 0.6), col="red") +
+        geom_hline(yintercept=-log10(0.05), col="red")
+
+# new col "delabel" adds the name of genes differentially expressed, adds NA if not DE
+dgeprolifendo$delabel <- NA
+dgeprolifendo$delabel[dgeprolifendo$diffexpressed != "NO"] <- row.names(dgeprolifendo)[dgeprolifendo$diffexpressed != "NO"]
+
+# make final plot!
+volcanoplotprolifendo <- ggplot(data=dgeprolifendo, aes(x=avg_log2FC, y=-log10(p_val_adj), col=diffexpressed, label=delabel)) + 
+    geom_point() + 
+    theme_minimal() +
+    geom_text(size = 2.7, col="black") + 
+    geom_vline(xintercept=c(-0.6, 0.6), col="red") +
+    geom_hline(yintercept=-log10(0.05), col="red") + 
+    ggtitle("Proliferating Endothelial Cells, Sham vs Resected")
+
+volcanoplotprolifendo
+
+ggsave(path = "path", filename = paste("dgeprolifendocellsnolabels", ".png", sep=""), plot = volcanoplotprolifendo)
+
+
+```
+
+```{r}
+# subset ENDOTHELIAL CELLS into separate seurat obj
+endo <- subset(samplescombined, idents = "Endothelial Cells")
+
+# find variable features between conditions (sham v resected)
+top30 <- head(VariableFeatures(endo), 30)
+plot1 <- VariableFeaturePlot(samplescombined)
+plot2 <- LabelPoints(plot = plot1, points = top20, repel = TRUE)
+plot2
+DoHeatmap(object = endo, group.by = "orig.ident", features = top30)
+
+# do MAST DGE on proliferating endothelial cell cluster
+Idents(endo) <- "orig.ident"
+dgeendo <- FindMarkers(endo, ident.1 = "Sample1", test.use="MAST", only.pos=FALSE, min.pct = 0, logfc.threshold = 0)
+
+# test plot, no fancy things
+# code from https://biocorecrg.github.io/CRG_RIntroduction/volcano-plots.html
+volcanoplotendo <- ggplot(data=dgeendo, aes(x=avg_log2FC, y=-log10(p_val_adj))) + geom_point() + theme_minimal()
+volcanoplotendo <- volcanoplotendo + geom_vline(xintercept=c(-0.6, 0.6), col="red") +
+    geom_hline(yintercept=-log10(0.05), col="red")
+volcanoplotendo
+
+dgeendo$diffexpressed <- "NO"
+# if avg_log2FC > 0.6 and pvalue < 0.05, set as "UP" 
+dgeendo$diffexpressed[dgeendo$avg_log2FC > 0.6 & dgeendo$p_val_adj < 0.05] <- "UP"
+# if avg_log2FC < -0.6 and pvalue < 0.05, set as "DOWN"
+dgeendo$diffexpressed[dgeendo$avg_log2FC < -0.6 & dgeendo$p_val_adj < 0.05] <- "DOWN"
+
+# color points with "diffexpressed"
+volcanoplotendo <- ggplot(data=dgeendo, aes(x=avg_log2FC, y=-log10(p_val_adj), col=diffexpressed)) + geom_point() + theme_minimal()
+volcanoplotendo
+
+# add lines showing significance threshold
+volcanoplotendo <- volcanoplotendo + geom_vline(xintercept=c(-0.6, 0.6), col="red") +
+        geom_hline(yintercept=-log10(0.05), col="red")
+
+# new col "delabel" adds the name of genes differentially expressed, adds NA if not DE
+dgeendo$delabel <- NA
+dgeendo$delabel[dgeendo$diffexpressed != "NO"] <- row.names(dgeendo)[dgeendo$diffexpressed != "NO"]
+
+# make final plot!
+volcanoplotendo <- ggplot(data=dgeendo, aes(x=avg_log2FC, y=-log10(p_val_adj), col=diffexpressed, label=delabel)) + 
+    geom_point() + 
+    theme_minimal() +
+    geom_text(size = 2, col="black") + 
+    geom_vline(xintercept=c(-0.6, 0.6), col="red") +
+    geom_hline(yintercept=-log10(0.05), col="red") + 
+    ggtitle("Endothelial Cells, Sham vs Resected")
+
+volcanoplotendo
+
+ggsave(path = "path", filename = paste("dgeendocells", ".png", sep=""), plot = volcanoplotendo)
+```
+
+
